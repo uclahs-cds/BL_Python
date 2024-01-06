@@ -8,6 +8,18 @@ on:
     branches:
       - "**"
   workflow_dispatch:
+    inputs:
+      rewrite_dependencies:
+        description:
+          If "true" or empty CICD will rewrite BL_Python dependencies,\n
+          during the build only, to use the local filesystem checkout rather than PyPI.\n
+          If "false" CICD will not rewrite the BL_Python dependencies.
+        type: choice
+        options:
+          - true
+          - false
+        default: "true"
+        required: true
 
 jobs:
   All:
@@ -22,39 +34,57 @@ jobs:
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
+        id: install_python
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
 
+      - name: Create Venv
+        run: |
+          ${{ steps.install_python.outputs.python-path }} -m venv .github-venv
+
       - name: Install dependencies
         run: |
+          echo Setting up dependencies
           python -m pip install -U pip
-          ./install_all.sh
+          python -m pip install toml
+          REWRITE_DEPENDENCIES=${{ inputs.rewrite_dependencies }} \
+            ./.github/workflows/CICD-scripts/pyproject_dependency_rewrite.py
+          source .github-venv/bin/activate
+          ./install_all.sh -e
 
       - name: Test with pyright
         run: |
+          echo Running pyright
+          source .github-venv/bin/activate
           pyright
 
-      - name: Test with pytest
+      - name: Test with pytest and generate reports
         run: |
           echo Running pytest
-          # infra is not set up to support integration tests, so ignore postgresql
-          # etl has been updated, while the tests have not been
-          pytest --junitxml pytest.xml \
-                 -k "not acceptance"
+          source .github-venv/bin/activate
+          pytest -k "not acceptance"
+
+          coverage html
 
       - name: Output pytest report
         uses: actions/upload-artifact@v3
         with:
-          name: pytest-report
-          path: pytest.xml
+          name: pytest-and-coverage-report
+          path: |
+            pytest.xml
+            cov.xml
+            .coverage
+            htmlcov/
           retention-days: 1
           if-no-files-found: error
 
       - name: Check code style
         run: |
+          source .github-venv/bin/activate
           black --check src
 
       - name: Check import order
         run: |
+          source .github-venv/bin/activate
           isort --check-only src

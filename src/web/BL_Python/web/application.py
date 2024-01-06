@@ -3,28 +3,20 @@ Compound Assay Platform Flask application.
 
 Flask entry point.
 """
+import logging
 from os import environ, path
-from typing import Optional, cast
+from typing import Optional
 
+import json_logging
 from BL_Python.programming.config import AbstractConfig, ConfigBuilder, load_config
 from BL_Python.programming.dependency_injection import ConfigModule
-
-# from CAP.app.blueprints.sso import *
-# from CAP.app.dependencies import AppModule, AppSamlModule
-# from CAP.app.handlers import (
-#    register_api_request_handlers,
-#    register_api_response_handlers,
-#    register_app_teardown_handlers,
-#    register_error_handlers,
-# )
-# from CAP.app.services.user.login_manager import LoginManager
-# from CAP.database.models.CAP import Base
-from connexion.apps.flask_app import FlaskApp
-from flask import Flask, url_for
+from connexion import (  # pyright: ignore[reportMissingTypeStubs] Connexion is missing py.typed file
+    FlaskApp,
+)
+from flask import Blueprint, Flask, url_for
 from injector import Module
 from lib_programname import get_path_executed_script
 
-# from .config import Config, ConfigBuilder, load_config
 from .config import Config
 from .middleware import (
     configure_dependencies,
@@ -55,6 +47,9 @@ def create_app(
         name: The name of the application. Replaces the value of `FLASK_APP` if not None.
         environment: The environment in which to run Flask. Can be one of `development`, `test`, or `production`. Replaces `FLASK_ENV` if not None.
     """
+    # set up the default configuration as soon as possible
+    # also required to call before json_logging.config_root_logger()
+    logging.basicConfig(force=True)
 
     config_overrides = {}
     if environ.get("FLASK_APP"):
@@ -92,12 +87,10 @@ def create_app(
     app: Flask
 
     if full_config.flask.openapi is not None:
-        openapi: FlaskApp = configure_openapi(full_config, full_config.flask.app_name)
-        app = cast(Flask, openapi.app)
+        openapi: FlaskApp = configure_openapi(full_config)
+        app = openapi.app
     else:
-        app = Flask(full_config.flask.app_name)
-        full_config.update_flask_config(app.config)
-        configure_blueprint_routes(app)
+        app = configure_blueprint_routes(full_config)
 
     register_error_handlers(app)
     register_api_request_handlers(app)
@@ -117,9 +110,9 @@ def create_app(
     # The `full_config` module cannot be overridden unless the application
     # IoC container is fiddled with. `full_config` is the instance registered
     # to `AbstractConfig`.
-    modules = application_modules + [ConfigModule(full_config)]
+    modules = application_modules + [ConfigModule(full_config, type(full_config))]
     flask_injector = configure_dependencies(app, application_modules=modules)
-    app.injector = flask_injector
+    app.injector = flask_injector  # pyright: ignore[reportGeneralTypeIssues]
 
     return app
 
@@ -138,15 +131,15 @@ def configure_openapi(config: Config, name: Optional[str] = None):
             "OpenAPI configuration is empty. Review the `openapi` section of your application's `config.toml`."
         )
 
-    # host configuration set up
-    # TODO host/port setup should move into application initialization
-    # and not be tied to connexion configuration
-    host = "127.0.0.1"
-    port = 5000
-    # TODO replace SERVER_NAME with host/port in config
-    if environ.get("SERVER_NAME") is not None:
-        (host, port_str) = environ["SERVER_NAME"].split(":")
-        port = int(port_str)
+    ## host configuration set up
+    ## TODO host/port setup should move into application initialization
+    ## and not be tied to connexion configuration
+    # host = "127.0.0.1"
+    # port = 5000
+    ## TODO replace SERVER_NAME with host/port in config
+    # if environ.get("SERVER_NAME") is not None:
+    #    (host, port_str) = environ["SERVER_NAME"].split(":")
+    #    port = int(port_str)
 
     # connexion and openapi set up
     # openapi_spec_dir: str = "app/swagger/"
@@ -156,22 +149,25 @@ def configure_openapi(config: Config, name: Optional[str] = None):
     exec_dir = _get_exec_dir()
 
     connexion_app = FlaskApp(
-        __name__ if name is None else name,
+        config.flask.app_name,
         # TODO support relative OPENAPI_SPEC_DIR and prepend program_dir?
         specification_dir=exec_dir,
-        host=host,
-        port=port,
+        # host=host,
+        # port=port,
     )
-    app = cast(Flask, connexion_app.app)
+    app = connexion_app.app
     config.update_flask_config(app.config)
 
-    # flask request log handler
-    # enable_json = not environ.get("PLAINTEXT_LOG_OUTPUT")
-    # FIXME this errors in the new structure
-    # json_logging.init_connexion(enable_json=enable_json)
-    # json_logging.init_request_instrument(connexion_app)
-    # if enable_json:
-    #    json_logging.config_root_logger()
+    enable_json_logging = config.logging.format == "JSON"
+    if enable_json_logging:
+        json_logging.init_connexion(  # pyright: ignore[reportUnknownMemberType]
+            enable_json=enable_json_logging
+        )
+        json_logging.init_request_instrument(  # pyright: ignore[reportUnknownMemberType]
+            connexion_app
+        )
+        json_logging.config_root_logger()  # pyright: ignore[reportUnknownMemberType]
+
     app.logger.setLevel(environ.get("LOGLEVEL", "INFO").upper())
 
     options: dict[str, bool | str] = {
@@ -179,7 +175,7 @@ def configure_openapi(config: Config, name: Optional[str] = None):
         "swagger_url": config.flask.openapi.swagger_url or "/",
     }
 
-    _ = connexion_app.add_api(
+    _ = connexion_app.add_api(  # pyright: ignore[reportUnknownMemberType]
         f"{config.flask.app_name}/{config.flask.openapi.spec_path}",
         base_path="/",
         validate_responses=config.flask.openapi.validate_responses,
@@ -198,10 +194,39 @@ def configure_openapi(config: Config, name: Optional[str] = None):
     return connexion_app
 
 
-def configure_blueprint_routes(app: Flask, blueprint_import_subdir: str = "endpoints"):
+def configure_blueprint_routes(
+    config: Config, blueprint_import_subdir: str = "endpoints"
+):
     """
     Register Flask blueprints and API routes
     """
+    if config.flask is None:
+        raise Exception(
+            "Flask configuration is empty. Review the `flask` section of your application's `config.toml`."
+        )
+
+    app = Flask(config.flask.app_name)
+    config.update_flask_config(app.config)
+
+    enable_json_logging = config.logging.format == "JSON"
+    if enable_json_logging:
+        # json_logging.init_flask(enable_json=enable_json_logging)
+        # json_logging.ENABLE_JSON_LOGGING = True
+        json_logging.init_flask(  # pyright: ignore[reportUnknownMemberType]
+            enable_json=enable_json_logging
+        )
+        # json_logging.__init(framework_name="flask")
+        json_logging.init_request_instrument(  # pyright: ignore[reportUnknownMemberType]
+            app
+        )
+        json_logging.config_root_logger()  # pyright: ignore[reportUnknownMemberType]
+
+    blueprint_modules = _import_blueprint_modules(app, blueprint_import_subdir)
+    _register_blueprint_modules(app, blueprint_modules)
+    return app
+
+
+def _import_blueprint_modules(app: Flask, blueprint_import_subdir: str):
     from importlib.util import module_from_spec, spec_from_file_location
     from pathlib import Path
 
@@ -211,6 +236,8 @@ def configure_blueprint_routes(app: Flask, blueprint_import_subdir: str = "endpo
     blueprint_import_dir = Path(program_dir, blueprint_import_subdir)
 
     module_paths = blueprint_import_dir.glob("*.py")
+
+    blueprint_modules: list[Blueprint] = []
 
     for path in module_paths:
         if not (path.is_file() or path.name == "__init__.py"):
@@ -225,90 +252,13 @@ def configure_blueprint_routes(app: Flask, blueprint_import_subdir: str = "endpo
         # find all Flask blueprints in
         # the module and register them
         for module_name, module_var in vars(module).items():
-            if not (
-                module_name.endswith("_blueprint") or isinstance(module_var, Blueprint)
-            ):
-                continue
-            app.register_blueprint(cast(Blueprint, module_var))
+            # TODO why did we allow _blueprint when it's not a Blueprint?
+            if module_name.endswith("_blueprint") or isinstance(module_var, Blueprint):
+                blueprint_modules.append(module_var)
+
+    return blueprint_modules
 
 
-# class ConfigurationBuilder:
-#    _DEFAULT_CONFIG_FILENAME = "config.toml"
-#
-#    def __init__(self) -> None:
-#        self._config_filename = ConfigurationBuilder._DEFAULT_CONFIG_FILENAME
-#
-#    def use_config_file(self, config_filename: str):
-#        self._config_filename = config_filename
-#
-#    def add_config(self, config: Config):
-#        pass
-#
-#    def build(self) -> Config:
-#        return load_config(self._config_filename)
-#
-#
-# class ApplicationBuilder:
-#    _configuration_callback: Callable[[ConfigurationBuilder], None] | None = None
-#
-#    def use_config(
-#        self,
-#        configuration_callback: Callable[[ConfigurationBuilder], None],
-#    ):
-#        self._configuration_callback = configuration_callback
-#        return self
-#
-#    def build(self):
-#        configuration_builder = ConfigurationBuilder()
-#        configuration: Config
-#        if self._configuration_callback is not None:
-#            self._configuration_callback(configuration_builder)
-#        configuration = configuration_builder.build()
-#
-#        return create_app(configuration)
-#
-#
-# class IStartup(Protocol):
-#    #    def configure_dependencies(self, services: BlappServices):
-#    #        ...
-#
-#    def configure_application(self, app_builder: ApplicationBuilder):
-#        ...
-#
-#
-# class IStartupBuilder(Protocol):
-#    def __init__(self, startup: Type[IStartup]) -> None:
-#        ...
-#
-#    def build(self) -> Flask:
-#        ...
-#
-#
-# class StartupBuilder:
-#    _application: IStartup
-#
-#    def __init__(self, startup: Type[IStartup]) -> None:
-#        # TODO replace `object()` with the config object
-#        self._application = startup()
-#
-#    def build(self):
-#        # service_registry = BlappServices()
-#        application_builder = ApplicationBuilder()
-#
-#        # self._application.configure_dependencies(service_registry)
-#        self._application.configure_application(application_builder)
-#
-#        return application_builder.build()
-#
-#
-# class Startup:
-#    def configure_application(self, app_builder: ApplicationBuilder):
-#        app_builder.use_config()
-#        pass
-#
-#    def build(self):
-#        pass
-#
-#
-# test_app = create_app(StartupBuilder(Startup))
-#
+def _register_blueprint_modules(app: Flask, blueprint_modules: list[Blueprint]):
+    for module in blueprint_modules:
+        app.register_blueprint(module)

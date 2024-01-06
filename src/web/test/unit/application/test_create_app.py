@@ -1,33 +1,50 @@
 from os import environ
 
 import pytest
-from BL_Python.web.application import create_app
-from BL_Python.web.config import Config, FlaskConfig
+from BL_Python.web.application import (
+    configure_blueprint_routes,
+    configure_openapi,
+    create_app,
+)
+from BL_Python.web.config import Config
 from pytest_mock import MockerFixture
 
+from ..create_app import CreateApp, FlaskClientConfigurable
 
-class TestCreateApp:
-    def _get_basic_config(self):
-        return Config(flask=FlaskConfig(app_name="test_app"))
 
-    # https://stackoverflow.com/a/55079736
-    # creates a fixture on this class called `setup_method_fixture`
-    # then tells pytest to use it for every test in the class
-    @pytest.fixture(autouse=True)
-    def setup_method_fixture(self, mocker: MockerFixture):
-        _ = mocker.patch("io.open")
-        _ = mocker.patch("toml.decoder.loads", return_value={})
-        _ = mocker.patch("BL_Python.web.application.configure_blueprint_routes")
+class TestCreateApp(CreateApp):
+    def test__create_app__requires_flask_config(
+        self, flask_client_configurable: FlaskClientConfigurable
+    ):
+        with pytest.raises(
+            Exception,
+            match=r"^You must set \[flask\] in the application configuration\.$",
+        ):
+            _ = flask_client_configurable(Config())
 
-    def test__loads_config_from_toml(self, mocker: MockerFixture):
+    # TODO extend blueprint and openapi tests to cover each relevant config attribute
+    def test__configure_blueprint_routes__requires_flask_config(self):
+        with pytest.raises(
+            Exception,
+            match=r"^Flask configuration is empty\. Review the `flask` section of your application's `config\.toml`\.$",
+        ):
+            _ = configure_blueprint_routes(Config())
+
+    def test__configure_openapi__requires_flask_config(self):
+        with pytest.raises(
+            Exception,
+            match=r"^OpenAPI configuration is empty\. Review the `openapi` section of your application's `config\.toml`\.$",
+        ):
+            _ = configure_openapi(Config())
+
+    def test__create_app__loads_config_from_toml(
+        self, basic_config: Config, mocker: MockerFixture
+    ):
         load_config_mock = mocker.patch(
-            "BL_Python.web.application.load_config",
-            return_value=self._get_basic_config(),
+            "BL_Python.web.application.load_config", return_value=basic_config
         )
 
-        toml_filename = (
-            f"{TestCreateApp.test__loads_config_from_toml.__name__}-config.toml"
-        )
+        toml_filename = f"{TestCreateApp.test__create_app__loads_config_from_toml.__name__}-config.toml"
         _ = create_app(config_filename=toml_filename)
         assert load_config_mock.called
         assert load_config_mock.call_args and load_config_mock.call_args[0]
@@ -40,21 +57,23 @@ class TestCreateApp:
             ("FLASK_ENV", "env", "barfoo"),
         ],
     )
-    def test__updates_flask_config_from_envvars(
+    def test__create_app__updates_flask_config_from_envvars(
         self,
         envvar_name: str,
         config_var_name: str,
         var_value: str,
+        basic_config: Config,
         mocker: MockerFixture,
     ):
-        config = self._get_basic_config()
-        object.__setattr__(config.flask, config_var_name, var_value)
+        object.__setattr__(basic_config.flask, config_var_name, var_value)
 
         environ.update({envvar_name: var_value})
-        _ = mocker.patch("BL_Python.web.application.load_config", return_value=config)
+        _ = mocker.patch(
+            "BL_Python.web.application.load_config", return_value=basic_config
+        )
         _ = create_app()
 
-        assert object.__getattribute__(config.flask, config_var_name) == var_value
+        assert object.__getattribute__(basic_config.flask, config_var_name) == var_value
 
     @pytest.mark.parametrize(
         "envvar_name,config_var_name,var_value,should_fail",
@@ -66,7 +85,7 @@ class TestCreateApp:
             (None, "env", "barfoo", False),
         ],
     )
-    def test__requires_application_name(
+    def test__create_app__requires_application_name(
         self,
         envvar_name: str | None,
         config_var_name: str | None,
