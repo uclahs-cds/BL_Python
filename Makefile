@@ -23,7 +23,14 @@ GITHUB_REF ?= 00000000-0000-0000-0000-000000000000
 # Can be overridden.
 GITHUB_WORKSPACE ?= $(CURDIR)
 
+# What repository to publish packages to.
+# `testpypi` and `pypi` are valid values.
 PYPI_REPO ?= testpypi
+
+# The directory to write ephermal reports to,
+# such as pytest coverage reports.
+REPORTS_DIR ?= reports
+
 
 # Can be overridden. This is used to change the prereqs
 # of some supporting targets, like `format-ruff`.
@@ -67,10 +74,12 @@ PYPROJECT_FILES=./pyproject.toml $(wildcard src/*/pyproject.toml)
 PACKAGE_PATHS=$(subst /pyproject.toml,,$(PYPROJECT_FILES))
 PACKAGES=BL_Python.all $(subst /pyproject.toml,,$(subst src/,BL_Python.,$(wildcard src/*/pyproject.toml)))
 
+.PHONY: dev
 # Rather than duplicating BL_Python.all,
 # just prereq it.
 dev : dev_mode BL_Python.all
 
+.PHONY: cicd
 cicd : cicd_mode $(VENV) $(PYPROJECT_FILES)
 	@if [ -f $(call package_to_inst,) ]; then
 		echo "Package is already built, skipping..."
@@ -165,6 +174,7 @@ format-ruff : $(VENV) $(DEFAULT_TARGET)
 
 	ruff format --preview --respect-gitignore
 
+.PHONY: format format-ruff format-isort
 format : $(VENV) $(DEFAULT_TARGET) format-isort format-ruff
 
 
@@ -197,13 +207,23 @@ test-pyright : $(VENV) $(DEFAULT_TARGET)
 test-pytest : $(VENV) $(DEFAULT_TARGET)
 	$(ACTIVATE_VENV)
 
-	pytest $(PYTEST_FLAGS)
-	coverage html -d coverage
+	pytest $(PYTEST_FLAGS) \
+		&& PYTEST_EXIT_CODE=0 \
+		|| PYTEST_EXIT_CODE=$$?
 
+	-coverage html --data-file=$(REPORTS_DIR)/pytest/.coverage
+	-junit2html $(REPORTS_DIR)/pytest/pytest.xml $(REPORTS_DIR)/pytest/pytest.html
+
+	exit $$PYTEST_EXIT_CODE
+
+.PHONY: test test-pytest test-pyright test-ruff test-isort
+_test : $(VENV) $(DEFAULT_TARGET) test-isort test-ruff test-pyright test-pytest
 test : CMD_PREFIX=@
-test : $(VENV) $(DEFAULT_TARGET) clean-test test-isort test-ruff test-pyright test-pytest
+test : clean-test
+	$(MAKE) -j --keep-going _test
 
 
+.PHONY: publish-all
 # Publishing should use a real install, which `cicd` fulfills
 publish-all : REWRITE_DEPENDENCIES=false
 publish-all : reset $(VENV)
@@ -213,32 +233,39 @@ publish-all : reset $(VENV)
 
 
 clean-build :
-	find . -type d \( \
+	find . -type d \
+	\( \
+		-path ./$(VENV) \
+		-o -path ./.git \
+	\) -prune -false \
+	-o \( \
 		-name build \
+		-o -name dist \
 		-o -name __pycache__ \
 		-o -name \*.egg-info \
 		-o -name .pytest-cache \
 	\) -prune -exec rm -rf {} \;
 
 clean-test :
-	$(CMD_PREFIX)rm -rf cov.xml \
-		pytest.xml \
-		coverage \
-		.coverage 
+	$(CMD_PREFIX)rm -rf \
+		$(REPORTS_DIR)/pytest
 
+.PHONY: clean clean-test clean-build
 clean : clean-build clean-test
 	rm -rf $(VENV)
 
 	@echo '\nDeactivate your venv with `deactivate`'
 
+.PHONY: remake
 remake :
-	make clean
-	make
+	$(MAKE) clean
+	$(MAKE)
 
 reset-check:
 #	https://stackoverflow.com/a/47839479
 	@echo -n "This will make destructive changes! Considering stashing changes first.\n"
 	@( read -p "Are you sure? [y/N]: " response && case "$$response" in [yY]) true;; *) false;; esac )
 
+.PHONY: reset reset-check
 reset : reset-check clean
 	git checkout -- $(PYPROJECT_FILES)
