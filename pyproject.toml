@@ -83,7 +83,7 @@ packages = [
 [project.optional-dependencies]
 dev-dependencies = [
     "tox ~= 4.18",
-    "pytest ~= 8.0",
+    "pytest ~= 9.0",
     "pytest-mock",
     "mock",
     "pytest-cov >= 4.1,< 7.0",
